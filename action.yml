@@ -71,13 +71,20 @@ runs:
         echo "KANNICH_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
 
     - name: Restore Kannich cache
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      id: restore-cache
+      uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
       with:
         path: ${{ inputs.cache-dir }}
-        key: kannich-${{ runner.os }}
+        # The key includes run_id so it is always unique and never matches an existing
+        # entry exactly. This is intentional: GitHub cache entries are immutable, so an
+        # exact hit would cause the save step to be skipped, freezing the cache forever.
+        # Instead, restore-keys falls back to the most recent kannich-<os>-* entry, and
+        # the save step always writes a fresh entry with the accumulated cache content.
+        # In steady state GitHub's 7-day eviction policy keeps the number of entries
+        # small (roughly one per day of CI activity).
+        key: kannich-${{ runner.os }}-${{ github.run_id }}
         restore-keys: |
           kannich-${{ runner.os }}-
-        save-always: true
 
     - name: Configure environment
       shell: bash
@@ -115,8 +122,18 @@ runs:
         done <<< "$EXECUTIONS"
         exit "$FAILED"
 
+    # Kannich runs as root inside Docker, so cache files are owned by root.
+    # actions/cache/save cannot read root-owned files, so we fix ownership here
+    # before the save step runs. This step must come before Save Kannich cache.
     - name: Fix cache permissions
       if: always()
       shell: bash
       run: |
         sudo chown -R "$USER" "$KANNICH_CACHE_DIR"
+
+    - name: Save Kannich cache
+      if: always()
+      uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+      with:
+        path: ${{ inputs.cache-dir }}
+        key: ${{ steps.restore-cache.outputs.cache-primary-key }}
