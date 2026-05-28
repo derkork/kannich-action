@@ -1,0 +1,122 @@
+name: Run Kannich
+description: >
+  Runs one or more Kannich build executions with automatic caching.
+  Expects kannichw to be committed to the repository.
+
+inputs:
+  image:
+    description: >
+      The Kannich Docker image to use. Accepts both tag notation
+      (derkork/kannich:0.11.0-0.10.0) and digest notation
+      (derkork/kannich@sha256:...).
+    required: true
+  executions:
+    description: >
+      Kannich executions to run, one per line. Each non-empty line is
+      passed as arguments to kannichw. If one execution fails, subsequent
+      ones are skipped but the cache is still saved.
+    required: true
+  kannichw-path:
+    description: >
+      Path to the kannichw wrapper script. Defaults to kannichw at the
+      repository root. Override for monorepos where kannichw lives in a
+      subdirectory (e.g. ./services/backend/kannichw).
+    required: false
+    default: '${{ github.workspace }}/kannichw'
+  cache-dir:
+    description: 'Host directory to use as the Kannich build cache.'
+    required: false
+    default: '~/.kannich-cache'
+  env:
+    description: >
+      Additional environment variables to pass to kannichw, in KEY=VALUE
+      format, one per line. Use this for Kannich environment variables such
+      as KANNICH_DOCKER_PROXY_URL, KANNICH_BOOTSTRAP_SETTINGS_XML, or any
+      variables your kannichfile needs.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Check runner OS
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          echo "::error::Kannich does not support Windows runners. Please use a Linux runner (e.g. ubuntu-latest)."
+          exit 1
+        fi
+
+    - name: Validate kannichw
+      shell: bash
+      env:
+        KANNICHW_PATH: ${{ inputs.kannichw-path }}
+      run: |
+        if [ ! -f "$KANNICHW_PATH" ]; then
+          echo "::error::kannichw not found at $KANNICHW_PATH. Make sure to commit the kannichw wrapper script to your repository."
+          exit 1
+        fi
+        if [ ! -x "$KANNICHW_PATH" ]; then
+          echo "::warning::kannichw at $KANNICHW_PATH is not executable. Making it executable."
+          chmod +x "$KANNICHW_PATH"
+        fi
+
+    - name: Set up cache directory
+      shell: bash
+      env:
+        CACHE_DIR_INPUT: ${{ inputs.cache-dir }}
+      run: |
+        CACHE_DIR="${CACHE_DIR_INPUT/#\~/$HOME}"
+        mkdir -p "$CACHE_DIR"
+        echo "KANNICH_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+
+    - name: Restore Kannich cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ${{ inputs.cache-dir }}
+        key: kannich-${{ runner.os }}
+        restore-keys: |
+          kannich-${{ runner.os }}-
+        save-always: true
+
+    - name: Configure environment
+      shell: bash
+      env:
+        KANNICH_IMAGE: ${{ inputs.image }}
+        USER_ENV: ${{ inputs.env }}
+      run: |
+        echo "KANNICH_IMAGE=$KANNICH_IMAGE" >> "$GITHUB_ENV"
+        while IFS= read -r line; do
+          case "$line" in
+            ''|'#'*) continue ;;
+          esac
+          echo "$line" >> "$GITHUB_ENV"
+        done <<< "$USER_ENV"
+
+    - name: Run executions
+      shell: bash
+      env:
+        EXECUTIONS: ${{ inputs.executions }}
+        KANNICHW_PATH: ${{ inputs.kannichw-path }}
+      run: |
+        FAILED=0
+        while IFS= read -r execution; do
+          case "$execution" in
+            ''|'#'*) continue ;;
+          esac
+          if [ "$FAILED" -ne 0 ]; then
+            echo "::warning::Skipping '$execution' because a previous execution failed."
+            continue
+          fi
+          echo "::group::Running: kannichw $execution"
+          # shellcheck disable=SC2086
+          "$KANNICHW_PATH" $execution || FAILED=$?
+          echo "::endgroup::"
+        done <<< "$EXECUTIONS"
+        exit "$FAILED"
+
+    - name: Fix cache permissions
+      if: always()
+      shell: bash
+      run: |
+        sudo chown -R "$USER" "$KANNICH_CACHE_DIR"
